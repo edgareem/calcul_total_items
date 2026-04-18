@@ -72,7 +72,7 @@ STATIC_EXCLUDED_ITEMS_BY_NAME = {
 
 ITEMS_FILE = Path("items.json")
 RECIPES_FILE = Path("recipes.json")
-EXCEL_FILE = Path("MC_Ultimate List.xlsx")
+MUSEUM_EXCEL_FILE = Path("Musee_Infinis_clean.xlsx")
 OUTPUT_JSON = Path("farming_summary.json")
 OUTPUT_TXT = Path("farming_totals.txt")
 OUTPUT_TREE_TXT = Path("farming_recipe_trees.txt")
@@ -96,16 +96,6 @@ def build_item_maps(items_data: List[Dict[str, Any]]) -> Tuple[Dict[int, dict], 
         by_id[item["id"]] = item
         by_name[item["name"]] = item
     return by_id, by_name
-
-
-def build_item_name_from_display_map(items_data: List[Dict[str, Any]]) -> Dict[str, str]:
-    display_to_name = {}
-    for item in items_data:
-        display_name = item.get("displayName")
-        item_name = item.get("name")
-        if display_name and item_name and display_name not in display_to_name:
-            display_to_name[display_name] = item_name
-    return display_to_name
 
 
 def normalize_item_lookup_key(value: str) -> str:
@@ -132,7 +122,7 @@ def build_item_lookup_map(items_data: List[Dict[str, Any]]) -> Dict[str, str]:
     return lookup
 
 
-def load_excluded_items_from_excel(
+def load_allowed_items_from_excel(
     excel_path: Path,
     items_by_name: Dict[str, dict],
     item_lookup_map: Dict[str, str],
@@ -143,12 +133,12 @@ def load_excluded_items_from_excel(
     print(f"[Excel] Ouverture du fichier : {excel_path}", flush=True)
     workbook = load_workbook(excel_path, read_only=True, data_only=True)
     try:
-        sheet_name = "items" if "items" in workbook.sheetnames else "Items"
+        sheet_name = "Sheet1" if "Sheet1" in workbook.sheetnames else workbook.sheetnames[0]
         worksheet = workbook[sheet_name]
         print(f"[Excel] Feuille utilisee : {sheet_name}", flush=True)
 
         header_row = next(
-            worksheet.iter_rows(min_row=2, max_row=2, values_only=True),
+            worksheet.iter_rows(min_row=1, max_row=1, values_only=True),
             None,
         )
         if header_row is None:
@@ -160,30 +150,27 @@ def load_excluded_items_from_excel(
             if value is not None
         }
 
-        item_name_col = headers.get("item name")
-        creative_only_col = headers.get("creative only")
+        english_name_col = headers.get("english_name")
 
-        if item_name_col is None or creative_only_col is None:
-            raise ValueError("Colonnes Excel introuvables: 'Item Name' ou 'Creative Only'.")
+        if english_name_col is None:
+            raise ValueError("Colonne Excel introuvable: 'english_name'.")
 
-        excluded_items = set(STATIC_EXCLUDED_ITEMS_BY_NAME)
-        print(f"[Excel] Debut de lecture des lignes de donnees...", flush=True)
+        allowed_items = set()
+        print(f"[Excel] Debut de lecture des lignes de donnees a conserver...", flush=True)
 
         for row_number, row_values in enumerate(
-            worksheet.iter_rows(min_row=5, values_only=True),
-            start=5,
+            worksheet.iter_rows(min_row=2, values_only=True),
+            start=2,
         ):
-            excel_item_name = row_values[item_name_col] if item_name_col < len(row_values) else None
-            creative_only = row_values[creative_only_col] if creative_only_col < len(row_values) else None
+            excel_item_name = row_values[english_name_col] if english_name_col < len(row_values) else None
 
-            # Affichage regulier pour confirmer que la lecture avance.
             if row_number == 5 or row_number % VERBOSE_EXCEL_EVERY == 0:
                 print(
-                    f"[Excel] Ligne {row_number}: item={excel_item_name!r}, creative_only={creative_only!r}",
+                    f"[Excel] Ligne {row_number}: english_name={excel_item_name!r}",
                     flush=True,
                 )
 
-            if creative_only is not True or not excel_item_name:
+            if not excel_item_name:
                 continue
 
             raw_excel_item_name = str(excel_item_name).strip()
@@ -193,9 +180,9 @@ def load_excluded_items_from_excel(
                 or item_lookup_map.get(normalized_excel_item_name)
             )
             if resolved_name and resolved_name in items_by_name:
-                excluded_items.add(resolved_name)
+                allowed_items.add(resolved_name)
                 print(
-                    f"[Excel] Exclusion ajoutee ligne {row_number}: {excel_item_name} -> {resolved_name}",
+                    f"[Excel] Item conserve ligne {row_number}: {excel_item_name} -> {resolved_name}",
                     flush=True,
                 )
             else:
@@ -204,8 +191,9 @@ def load_excluded_items_from_excel(
                     flush=True,
                 )
 
-        print(f"[Excel] Lecture terminee. Total exclus: {len(excluded_items)}", flush=True)
-        return excluded_items
+        allowed_items.difference_update(STATIC_EXCLUDED_ITEMS_BY_NAME)
+        print(f"[Excel] Lecture terminee. Total conserves: {len(allowed_items)}", flush=True)
+        return allowed_items
     finally:
         workbook.close()
 
@@ -347,7 +335,7 @@ class CraftAnalyzer:
         items_by_name: Dict[str, dict],
         recipes_by_result: Dict[int, List[Dict[str, Any]]],
         base_farmables_by_name: Set[str],
-        excluded_items_by_name: Set[str],
+        allowed_items_by_name: Set[str],
     ):
         self.items_by_id = items_by_id
         self.items_by_name = items_by_name
@@ -358,11 +346,12 @@ class CraftAnalyzer:
             for name in base_farmables_by_name
             if name in self.items_by_name
         }
-        self.excluded_item_ids = {
+        self.allowed_item_ids = {
             self.items_by_name[name]["id"]
-            for name in excluded_items_by_name
+            for name in allowed_items_by_name
             if name in self.items_by_name
         }
+        self.excluded_item_ids = set(self.items_by_id.keys()) - self.allowed_item_ids
 
         # Mémoisation : (item_id, qty) -> résultat
         self.memo: Dict[Tuple[int, int], Dict[str, Any]] = {}
@@ -540,8 +529,8 @@ def analyze_all_items():
         raise FileNotFoundError(f"Fichier introuvable: {ITEMS_FILE}")
     if not RECIPES_FILE.exists():
         raise FileNotFoundError(f"Fichier introuvable: {RECIPES_FILE}")
-    if not EXCEL_FILE.exists():
-        raise FileNotFoundError(f"Fichier introuvable: {EXCEL_FILE}")
+    if not MUSEUM_EXCEL_FILE.exists():
+        raise FileNotFoundError(f"Fichier introuvable: {MUSEUM_EXCEL_FILE}")
 
     print(f"[Init] Chargement de {ITEMS_FILE}...", flush=True)
     items_data = load_json(ITEMS_FILE)
@@ -554,8 +543,8 @@ def analyze_all_items():
     items_by_id, items_by_name = build_item_maps(items_data)
     item_lookup_map = build_item_lookup_map(items_data)
     recipes_by_result = normalize_recipes(recipes_data)
-    excluded_items_by_name = load_excluded_items_from_excel(
-        excel_path=EXCEL_FILE,
+    allowed_items_by_name = load_allowed_items_from_excel(
+        excel_path=MUSEUM_EXCEL_FILE,
         items_by_name=items_by_name,
         item_lookup_map=item_lookup_map,
     )
@@ -565,7 +554,7 @@ def analyze_all_items():
         items_by_name=items_by_name,
         recipes_by_result=recipes_by_result,
         base_farmables_by_name=BASE_FARMABLES_BY_NAME,
-        excluded_items_by_name=excluded_items_by_name,
+        allowed_items_by_name=allowed_items_by_name,
     )
 
     grand_total_base = Counter()
@@ -580,7 +569,7 @@ def analyze_all_items():
     total_items_to_process = len(item_ids_to_process)
     print(f"[Init] {total_items_to_process} items a analyser.", flush=True)
 
-    # Les items exclus par l'Excel sont retires du calcul principal, donc on les
+    # Les items absents de la liste musee ne sont pas traites, donc on les
     # ajoute explicitement au recapitulatif final pour qu'ils apparaissent bien.
     excluded_items_summary = Counter(
         {
@@ -621,7 +610,7 @@ def analyze_all_items():
         "config": {
             "chest_slots": CHEST_SLOTS,
             "base_farmables": sorted(BASE_FARMABLES_BY_NAME),
-            "excluded_items": sorted(excluded_items_by_name),
+            "allowed_items": sorted(allowed_items_by_name),
         },
         "global_totals": {
             "base_resources": counter_to_named_dict(grand_total_base, items_by_id),
