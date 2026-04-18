@@ -65,6 +65,44 @@ BASE_FARMABLES_BY_NAME = {
     "netherite_scrap", "ancient_debris", "blaze_rod", "ender_pearl",
 }
 
+# Regles de normalisation des ressources :
+# - on ramene plusieurs formes d'une meme ressource vers une forme canonique
+# - on evite de planifier des conversions reversibles inutiles
+# - le ratio est applique ainsi :
+#   canonical_qty = ceil(alias_qty * multiplier_num / multiplier_den)
+# Exemples :
+# - 1 iron_block -> 9 iron_ingot
+# - 9 iron_nugget -> 1 iron_ingot
+# - 8 stick -> 1 oak_log
+# Pour les sticks, on force la chaine :
+# stick -> oak_planks -> oak_log
+# afin d'exprimer la recolte en buches de chene.
+
+PRIORITY_BASE_ITEMS_BY_NAME = {
+    "iron_ingot", "gold_ingot", "copper_ingot", "netherite_ingot",
+    "diamond", "emerald", "redstone", "lapis_lazuli", "coal", "quartz",
+    "cobblestone", "oak_log", "spruce_log", "birch_log", "jungle_log",
+    "acacia_log", "dark_oak_log", "mangrove_log", "cherry_log",
+    "crimson_stem", "warped_stem",
+}
+
+# alias_name -> (canonical_name, multiplier_num, multiplier_den)
+REVERSIBLE_CANONICAL_RULES = {
+    "iron_nugget": ("iron_ingot", 1, 9),
+    "iron_block": ("iron_ingot", 9, 1),
+    "gold_nugget": ("gold_ingot", 1, 9),
+    "gold_block": ("gold_ingot", 9, 1),
+    "copper_block": ("copper_ingot", 9, 1),
+    "netherite_block": ("netherite_ingot", 9, 1),
+    "diamond_block": ("diamond", 9, 1),
+    "emerald_block": ("emerald", 9, 1),
+    "redstone_block": ("redstone", 9, 1),
+    "lapis_block": ("lapis_lazuli", 9, 1),
+    "coal_block": ("coal", 9, 1),
+    "quartz_block": ("quartz", 4, 1),
+    "stick": ("oak_log", 1, 8),
+}
+
 # Items à exclure complètement du calcul, même s'ils ne viennent pas du fichier Excel
 STATIC_EXCLUDED_ITEMS_BY_NAME = {
     "farmland",   # pas un item normal de stockage
@@ -324,6 +362,10 @@ def total_base_cost(counter: Counter) -> int:
     return sum(counter.values())
 
 
+def convert_qty_with_ratio(qty: int, multiplier_num: int, multiplier_den: int) -> int:
+    return math.ceil(qty * multiplier_num / multiplier_den)
+
+
 # =========================
 # Résolution récursive
 # =========================
@@ -346,12 +388,27 @@ class CraftAnalyzer:
             for name in base_farmables_by_name
             if name in self.items_by_name
         }
+        self.priority_base_ids = {
+            self.items_by_name[name]["id"]
+            for name in PRIORITY_BASE_ITEMS_BY_NAME
+            if name in self.items_by_name
+        }
         self.allowed_item_ids = {
             self.items_by_name[name]["id"]
             for name in allowed_items_by_name
             if name in self.items_by_name
         }
         self.excluded_item_ids = set(self.items_by_id.keys()) - self.allowed_item_ids
+        self.reversible_alias_rules_by_id = {}
+        for alias_name, (canonical_name, multiplier_num, multiplier_den) in REVERSIBLE_CANONICAL_RULES.items():
+            alias_item = self.items_by_name.get(alias_name)
+            canonical_item = self.items_by_name.get(canonical_name)
+            if alias_item and canonical_item:
+                self.reversible_alias_rules_by_id[alias_item["id"]] = (
+                    canonical_item["id"],
+                    multiplier_num,
+                    multiplier_den,
+                )
 
         # Mémoisation : (item_id, qty) -> résultat
         self.memo: Dict[Tuple[int, int], Dict[str, Any]] = {}
@@ -368,6 +425,36 @@ class CraftAnalyzer:
 
     def has_recipe(self, item_id: int) -> bool:
         return item_id in self.recipes_by_result and len(self.recipes_by_result[item_id]) > 0
+
+    def normalize_leaf_item(self, item_id: int, qty: int) -> Tuple[int, int]:
+        # Normalise une ressource "feuille" vers sa forme canonique de recolte.
+        # Exemple :
+        # - iron_block -> iron_ingot
+        # - iron_nugget -> iron_ingot
+        # - stick -> oak_log
+        rule = self.reversible_alias_rules_by_id.get(item_id)
+        if not rule:
+            return item_id, qty
+
+        canonical_id, multiplier_num, multiplier_den = rule
+        return canonical_id, convert_qty_with_ratio(qty, multiplier_num, multiplier_den)
+
+    def normalize_counter(self, counter: Counter) -> Counter:
+        normalized = Counter()
+        for item_id, qty in counter.items():
+            normalized_item_id, normalized_qty = self.normalize_leaf_item(item_id, qty)
+            normalized[normalized_item_id] += normalized_qty
+        return normalized
+
+    def reversible_penalty_for_ingredients(self, ingredients: Counter) -> int:
+        penalty = 0
+        for ingredient_id, ingredient_qty in ingredients.items():
+            if ingredient_id in self.reversible_alias_rules_by_id:
+                penalty += ingredient_qty
+        return penalty
+
+    def priority_base_bonus(self, counter: Counter) -> int:
+        return sum(qty for item_id, qty in counter.items() if item_id in self.priority_base_ids)
 
     def resolve_item(
         self,
@@ -403,10 +490,11 @@ class CraftAnalyzer:
 
         # Exclu
         if self.is_excluded(item_id):
+            normalized_item_id, normalized_qty = self.normalize_leaf_item(item_id, required_qty)
             result = {
                 "base_resources": Counter(),
                 "unresolved": Counter(),
-                "excluded": Counter({item_id: required_qty}),
+                "excluded": Counter({normalized_item_id: normalized_qty}),
                 "recipe_used": None
             }
             self.memo[memo_key] = deepcopy(result)
@@ -414,8 +502,9 @@ class CraftAnalyzer:
 
         # Ressource de base
         if self.is_base_farmable(item_id):
+            normalized_item_id, normalized_qty = self.normalize_leaf_item(item_id, required_qty)
             result = {
-                "base_resources": Counter({item_id: required_qty}),
+                "base_resources": Counter({normalized_item_id: normalized_qty}),
                 "unresolved": Counter(),
                 "excluded": Counter(),
                 "recipe_used": None
@@ -425,9 +514,10 @@ class CraftAnalyzer:
 
         # Anti-cycle
         if item_id in visiting:
+            normalized_item_id, normalized_qty = self.normalize_leaf_item(item_id, required_qty)
             result = {
                 "base_resources": Counter(),
-                "unresolved": Counter({item_id: required_qty}),
+                "unresolved": Counter({normalized_item_id: normalized_qty}),
                 "excluded": Counter(),
                 "recipe_used": None
             }
@@ -437,9 +527,10 @@ class CraftAnalyzer:
         # Pas de recette => non résolu => on considère qu'on doit le farmer tel quel
         # ou au moins le signaler.
         if not self.has_recipe(item_id):
+            normalized_item_id, normalized_qty = self.normalize_leaf_item(item_id, required_qty)
             result = {
                 "base_resources": Counter(),
-                "unresolved": Counter({item_id: required_qty}),
+                "unresolved": Counter({normalized_item_id: normalized_qty}),
                 "excluded": Counter(),
                 "recipe_used": None
             }
@@ -474,6 +565,11 @@ class CraftAnalyzer:
                 aggregate_unresolved.update(sub["unresolved"])
                 aggregate_excluded.update(sub["excluded"])
 
+            aggregate_base = self.normalize_counter(aggregate_base)
+            aggregate_unresolved = self.normalize_counter(aggregate_unresolved)
+            aggregate_excluded = self.normalize_counter(aggregate_excluded)
+            reversible_penalty = self.reversible_penalty_for_ingredients(ingredients)
+
             candidate_results.append({
                 "base_resources": aggregate_base,
                 "unresolved": aggregate_unresolved,
@@ -484,6 +580,7 @@ class CraftAnalyzer:
                     "ingredients": dict(recipe["ingredients"]),
                     "crafts_needed": crafts_needed
                 },
+                "reversible_penalty": reversible_penalty,
                 "score": (
                     sum(aggregate_unresolved.values()),  # d'abord minimiser les non résolus
                     total_base_cost(aggregate_base),      # puis minimiser les ressources de base
@@ -492,16 +589,26 @@ class CraftAnalyzer:
             })
 
         if not candidate_results:
+            normalized_item_id, normalized_qty = self.normalize_leaf_item(item_id, required_qty)
             result = {
                 "base_resources": Counter(),
-                "unresolved": Counter({item_id: required_qty}),
+                "unresolved": Counter({normalized_item_id: normalized_qty}),
                 "excluded": Counter(),
                 "recipe_used": None
             }
             self.memo[memo_key] = deepcopy(result)
             return result
 
-        best = min(candidate_results, key=lambda x: x["score"])
+        best = min(
+            candidate_results,
+            key=lambda x: (
+                sum(x["unresolved"].values()),
+                x["reversible_penalty"],
+                -self.priority_base_bonus(x["base_resources"]),
+                total_base_cost(x["base_resources"]),
+                sum(x["excluded"].values()),
+            ),
+        )
 
         result = {
             "base_resources": best["base_resources"],
