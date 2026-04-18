@@ -103,6 +103,16 @@ REVERSIBLE_CANONICAL_RULES = {
     "stick": ("oak_log", 1, 8),
 }
 
+# Ajustements manuels ajoutes au total global des ressources a farmer.
+# Format : item_name -> qty a additionner au total final.
+MANUAL_TOTAL_ADJUSTMENTS_BY_NAME = {
+    "arrow": 77760,
+    "glass_bottle": 3672,
+    "oak_log": 108,
+    "leather": 1161,
+    "sugar_cane": 3483,
+}
+
 # Items à exclure complètement du calcul, même s'ils ne viennent pas du fichier Excel
 STATIC_EXCLUDED_ITEMS_BY_NAME = {
     "farmland",   # pas un item normal de stockage
@@ -685,6 +695,15 @@ def analyze_all_items():
         }
     )
 
+    manual_total_adjustments = Counter()
+    for item_name, qty_to_add in MANUAL_TOTAL_ADJUSTMENTS_BY_NAME.items():
+        item = items_by_name.get(item_name)
+        if not item:
+            print(f"[Ajustement] Item introuvable ignore: {item_name}", flush=True)
+            continue
+        manual_total_adjustments[item["id"]] += qty_to_add
+        print(f"[Ajustement] {item_name} +{qty_to_add}", flush=True)
+
     for index, item_id in enumerate(item_ids_to_process, start=1):
         item = items_by_id[item_id]
         item_name = item["name"]
@@ -718,9 +737,13 @@ def analyze_all_items():
             "chest_slots": CHEST_SLOTS,
             "base_farmables": sorted(BASE_FARMABLES_BY_NAME),
             "allowed_items": sorted(allowed_items_by_name),
+            "manual_total_adjustments": dict(MANUAL_TOTAL_ADJUSTMENTS_BY_NAME),
         },
         "global_totals": {
-            "base_resources": counter_to_named_dict(grand_total_base, items_by_id),
+            "base_resources": counter_to_named_dict(
+                merge_counters(grand_total_base, manual_total_adjustments),
+                items_by_id,
+            ),
             "unresolved": counter_to_named_dict(grand_total_unresolved, items_by_id),
             "excluded": counter_to_named_dict(
                 merge_counters(grand_total_excluded, excluded_items_summary),
@@ -740,7 +763,7 @@ def analyze_all_items():
 
     write_human_readable_summary(
         items_by_id=items_by_id,
-        grand_total_base=grand_total_base,
+        grand_total_base=merge_counters(grand_total_base, manual_total_adjustments),
         grand_total_unresolved=grand_total_unresolved,
         grand_total_excluded=merge_counters(grand_total_excluded, excluded_items_summary),
         per_item_details=per_item_details,
