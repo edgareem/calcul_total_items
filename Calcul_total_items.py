@@ -167,6 +167,7 @@ STATIC_EXCLUDED_ITEMS_BY_NAME = {
 
 ITEMS_FILE = Path("items.json")
 RECIPES_FILE = Path("recipes.json")
+SELECTED_RECIPES_FILE = Path("selected_recipe_choices.json")
 MUSEUM_EXCEL_FILE = Path("Musee_Infinis_clean.xlsx")
 MUSEUM_OUTPUT_EXCEL_FILE = Path("Musee_Infinis_clean_with_totals.xlsx")
 OUTPUT_JSON = Path("farming_summary.json")
@@ -479,6 +480,95 @@ def normalize_recipes(raw_recipes: Dict[str, List[Dict[str, Any]]]) -> Dict[int,
             })
 
     return dict(normalized)
+
+
+def load_selected_recipe_choices(path: Path) -> Dict[str, int]:
+    """
+    Lit le fichier JSON qui indique, pour certains items, quel numero de craft garder.
+
+    Format attendu :
+    {
+        "barrel": 12,
+        "cake": 3
+    }
+
+    Le numero de craft est base sur l'ordre affiche dans le rapport
+    `duplicate_recipe_results.txt`, donc il commence a 1.
+    """
+    if not path.exists():
+        print(f"[Choix recettes] Fichier absent, aucun filtrage applique : {path}", flush=True)
+        return {}
+
+    data = load_json(path)
+    if not isinstance(data, dict):
+        raise ValueError(f"Le fichier {path} doit contenir un objet JSON nom -> numero de craft.")
+
+    cleaned_choices = {}
+    for item_name, recipe_number in data.items():
+        # On verifie defensivement les types lus depuis le JSON.
+        # Un JSON venant d'une edition manuelle peut contenir des erreurs.
+        if not isinstance(item_name, str):
+            continue
+        try:
+            cleaned_choices[item_name] = int(recipe_number)
+        except (TypeError, ValueError):
+            print(f"[Choix recettes] Valeur ignoree pour {item_name!r}: {recipe_number!r}", flush=True)
+
+    print(f"[Choix recettes] {len(cleaned_choices)} selections chargees depuis {path}", flush=True)
+    return cleaned_choices
+
+
+def apply_selected_recipe_choices(
+    recipes_by_result: Dict[int, List[Dict[str, Any]]],
+    items_by_id: Dict[int, dict],
+    selected_recipe_choices: Dict[str, int],
+) -> Dict[int, List[Dict[str, Any]]]:
+    """
+    Filtre les recettes multiples pour ne garder que le craft choisi par l'utilisateur.
+
+    Idee :
+    - si un item a plusieurs recettes et qu'un numero est fourni dans
+      `selected_recipe_choices`, on ne garde que cette recette
+    - sinon, on laisse toutes les recettes disponibles
+
+    Pourquoi le filtrage est fait ici ?
+    - parce qu'on veut simplifier le moteur de calcul principal
+    - le solveur continue ainsi de travailler sur "la liste des recettes
+      autorisees", sans savoir si cette liste a ete reduite ou non
+    """
+    filtered_recipes = {}
+
+    for result_item_id, recipe_list in recipes_by_result.items():
+        # On retrouve le nom de l'item resultat pour pouvoir faire la
+        # correspondance avec le fichier JSON des choix utilisateur.
+        item = items_by_id.get(result_item_id)
+        item_name = item["name"] if item else None
+
+        # Si aucun choix n'existe pour cet item, ou s'il n'a qu'une seule
+        # recette, on ne touche a rien.
+        if not item_name or item_name not in selected_recipe_choices or len(recipe_list) <= 1:
+            filtered_recipes[result_item_id] = recipe_list
+            continue
+
+        selected_recipe_number = selected_recipe_choices[item_name]
+        selected_index = selected_recipe_number - 1
+
+        # Les numerots affiches a l'utilisateur commencent a 1.
+        # Les listes Python, elles, commencent a 0.
+        if 0 <= selected_index < len(recipe_list):
+            filtered_recipes[result_item_id] = [recipe_list[selected_index]]
+            print(
+                f"[Choix recettes] {item_name}: craft {selected_recipe_number} conserve sur {len(recipe_list)}",
+                flush=True,
+            )
+        else:
+            filtered_recipes[result_item_id] = recipe_list
+            print(
+                f"[Choix recettes] {item_name}: craft {selected_recipe_number} invalide, toutes les recettes gardees",
+                flush=True,
+            )
+
+    return filtered_recipes
 
 
 # =========================
@@ -889,6 +979,38 @@ def analyze_all_items():
     items_by_id, items_by_name = build_item_maps(items_data)
     item_lookup_map = build_item_lookup_map(items_data)
     recipes_by_result = normalize_recipes(recipes_data)
+
+    # On charge ici un fichier de preferences utilisateur indiquant, pour
+    # certains items a recettes multiples, quel craft doit etre conserve.
+    # Cela permet d'eviter les doublons de variantes et d'imposer des choix
+    # plus coherents avec le projet (exemple : une essence de bois precise).
+    selected_recipe_choices = load_selected_recipe_choices(SELECTED_RECIPES_FILE)
+
+    # Une fois les recettes normalisees, on applique le filtre.
+    # A partir de ce point, le moteur de calcul travaille uniquement avec
+    # les recettes autorisees apres selection.
+    recipes_by_result = apply_selected_recipe_choices(
+        recipes_by_result=recipes_by_result,
+        items_by_id=items_by_id,
+        selected_recipe_choices=selected_recipe_choices,
+    )
+
+    # Ces deux ensembles servent a enrichir l'export Excel avec deux questions :
+    # - l'item apparait-il comme resultat d'une recette ?
+    # - l'item apparait-il comme ingredient d'une recette ?
+    recipe_result_items_by_name = set()
+    recipe_ingredient_items_by_name = set()
+    for result_item_id, recipe_list in recipes_by_result.items():
+        result_item = items_by_id.get(result_item_id)
+        if result_item:
+            recipe_result_items_by_name.add(result_item["name"])
+
+        for recipe in recipe_list:
+            for ingredient_item_id in recipe["ingredients"].keys():
+                ingredient_item = items_by_id.get(int(ingredient_item_id))
+                if ingredient_item:
+                    recipe_ingredient_items_by_name.add(ingredient_item["name"])
+
     allowed_items_by_name = load_allowed_items_from_excel(
         excel_path=MUSEUM_EXCEL_FILE,
         items_by_name=items_by_name,
@@ -979,6 +1101,7 @@ def analyze_all_items():
             "base_farmables": sorted(BASE_FARMABLES_BY_NAME),
             "allowed_items": sorted(allowed_items_by_name),
             "manual_total_adjustments": dict(MANUAL_TOTAL_ADJUSTMENTS_BY_NAME),
+            "selected_recipe_choices": selected_recipe_choices,
         },
         "global_totals": {
             "base_resources": counter_to_named_dict(
@@ -1006,6 +1129,8 @@ def analyze_all_items():
         output_excel_path=MUSEUM_OUTPUT_EXCEL_FILE,
         items_data=items_data,
         summary=summary,
+        recipe_result_items_by_name=recipe_result_items_by_name,
+        recipe_ingredient_items_by_name=recipe_ingredient_items_by_name,
     )
 
     # Ecriture des autres sorties plus "humaines".
@@ -1056,6 +1181,8 @@ def export_museum_excel_with_totals(
     output_excel_path: Path,
     items_data: List[Dict[str, Any]],
     summary: Dict[str, Any],
+    recipe_result_items_by_name: Set[str],
+    recipe_ingredient_items_by_name: Set[str],
 ) -> None:
     """
     Cree une copie du fichier Excel du musee et y ajoute deux colonnes calculees.
@@ -1068,6 +1195,10 @@ def export_museum_excel_with_totals(
       dans `unresolved` par le moteur)
     - I : "Total cible item"
       quantite cible de cet item lui-meme
+    - J : "OnRecipes_Res"
+      `true` si l'item apparait comme resultat dans `recipes.json`
+    - K : "OnRecipes_Ingredient"
+      `true` si l'item apparait comme ingredient dans `recipes.json`
 
     Pourquoi faire cette exportation a la fin ?
     - parce que ces valeurs n'existent qu'une fois les calculs termines
@@ -1096,6 +1227,8 @@ def export_museum_excel_with_totals(
         # On ecrit les en-tetes des nouvelles colonnes.
         worksheet.cell(row=1, column=8).value = "Total à farm"
         worksheet.cell(row=1, column=9).value = "Total cible item"
+        worksheet.cell(row=1, column=10).value = "OnRecipes_Res"
+        worksheet.cell(row=1, column=11).value = "OnRecipes_Ingredient"
 
         # On parcourt toutes les lignes de donnees du fichier musee.
         for row_number in range(2, worksheet.max_row + 1):
@@ -1103,11 +1236,15 @@ def export_museum_excel_with_totals(
 
             total_to_farm_cell = worksheet.cell(row=row_number, column=8)
             target_total_cell = worksheet.cell(row=row_number, column=9)
+            on_recipes_result_cell = worksheet.cell(row=row_number, column=10)
+            on_recipes_ingredient_cell = worksheet.cell(row=row_number, column=11)
 
             # Si la ligne n'a pas de nom anglais, on met 0 dans les colonnes.
             if not english_name:
                 total_to_farm_cell.value = 0
                 target_total_cell.value = 0
+                on_recipes_result_cell.value = "false"
+                on_recipes_ingredient_cell.value = "false"
                 continue
 
             raw_excel_item_name = str(english_name).strip()
@@ -1121,6 +1258,8 @@ def export_museum_excel_with_totals(
             if not resolved_item_name:
                 total_to_farm_cell.value = 0
                 target_total_cell.value = 0
+                on_recipes_result_cell.value = "false"
+                on_recipes_ingredient_cell.value = "false"
                 continue
 
             # La colonne H utilise le total global calcule pour cet item.
@@ -1138,6 +1277,12 @@ def export_museum_excel_with_totals(
             # La colonne I utilise la quantite cible de l'item lui-meme.
             item_detail = per_item_details.get(resolved_item_name, {})
             target_total_cell.value = int(item_detail.get("target_quantity", 0))
+
+            # Colonnes J et K :
+            # - resultat de recette ?
+            # - ingredient de recette ?
+            on_recipes_result_cell.value = "true" if resolved_item_name in recipe_result_items_by_name else "false"
+            on_recipes_ingredient_cell.value = "true" if resolved_item_name in recipe_ingredient_items_by_name else "false"
 
         workbook.save(output_excel_path)
     finally:
