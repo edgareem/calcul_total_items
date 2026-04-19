@@ -22,9 +22,11 @@ from collections import Counter
 from typing import Any, Dict, List, Tuple
 
 
-RECIPES_FILE = Path("recipes.json")
-ITEMS_FILE = Path("items.json")
-OUTPUT_FILE = Path("duplicate_recipe_results.txt")
+INPUT_DIR = Path("entree")
+RECIPES_FILE = INPUT_DIR / "recipes.json"
+ITEMS_FILE = INPUT_DIR / "items.json"
+OUTPUT_DIR = Path("sortie doublons recettes")
+OUTPUT_FILE = OUTPUT_DIR / "duplicate_recipe_results.txt"
 
 
 def load_json(path: Path) -> Any:
@@ -159,6 +161,10 @@ def main() -> None:
         raise FileNotFoundError(f"Fichier introuvable: {RECIPES_FILE}")
     if not ITEMS_FILE.exists():
         raise FileNotFoundError(f"Fichier introuvable: {ITEMS_FILE}")
+
+    # On regroupe les sorties du script dans un dossier dedie pour separer
+    # clairement les fichiers sources JSON du rapport genere.
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print(f"[Init] Chargement de {ITEMS_FILE}...")
     items_data = load_json(ITEMS_FILE)

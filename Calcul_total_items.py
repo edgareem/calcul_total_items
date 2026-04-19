@@ -165,14 +165,18 @@ STATIC_EXCLUDED_ITEMS_BY_NAME = {
     "farmland",   # pas un item normal de stockage
 }
 
-ITEMS_FILE = Path("items.json")
-RECIPES_FILE = Path("recipes.json")
-SELECTED_RECIPES_FILE = Path("selected_recipe_choices.json")
-MUSEUM_EXCEL_FILE = Path("Musee_Infinis_clean.xlsx")
-MUSEUM_OUTPUT_EXCEL_FILE = Path("Musee_Infinis_clean_with_totals.xlsx")
-OUTPUT_JSON = Path("farming_summary.json")
-OUTPUT_TXT = Path("farming_totals.txt")
-OUTPUT_TREE_TXT = Path("farming_recipe_trees.txt")
+INPUT_DIR = Path("entree")
+ITEMS_FILE = INPUT_DIR / "items.json"
+RECIPES_FILE = INPUT_DIR / "recipes.json"
+DUPLICATE_RECIPES_OUTPUT_DIR = Path("sortie doublons recettes")
+SELECTED_RECIPES_FILE = DUPLICATE_RECIPES_OUTPUT_DIR / "selected_recipe_choices.json"
+LEGACY_SELECTED_RECIPES_FILE = Path("selected_recipe_choices.json")
+MUSEUM_EXCEL_FILE = INPUT_DIR / "Musee_Infinis_clean.xlsx"
+OUTPUT_DIR = Path("sortie calcul totaux")
+MUSEUM_OUTPUT_EXCEL_FILE = OUTPUT_DIR / "Musee_Infinis_clean_with_totals.xlsx"
+OUTPUT_JSON = OUTPUT_DIR / "farming_summary.json"
+OUTPUT_TXT = OUTPUT_DIR / "farming_totals.txt"
+OUTPUT_TREE_TXT = OUTPUT_DIR / "farming_recipe_trees.txt"
 
 VERBOSE_EXCEL_EVERY = 1000
 
@@ -495,13 +499,24 @@ def load_selected_recipe_choices(path: Path) -> Dict[str, int]:
     Le numero de craft est base sur l'ordre affiche dans le rapport
     `duplicate_recipe_results.txt`, donc il commence a 1.
     """
-    if not path.exists():
+    # On cherche d'abord le fichier dans le dossier dedie aux sorties et aux
+    # choix de recettes. Pour rester compatible avec l'ancien fonctionnement,
+    # on accepte encore temporairement l'ancien emplacement a la racine.
+    effective_path = path
+    if not effective_path.exists() and LEGACY_SELECTED_RECIPES_FILE.exists():
+        effective_path = LEGACY_SELECTED_RECIPES_FILE
+        print(
+            f"[Choix recettes] Ancien emplacement detecte, utilisation de {effective_path}",
+            flush=True,
+        )
+
+    if not effective_path.exists():
         print(f"[Choix recettes] Fichier absent, aucun filtrage applique : {path}", flush=True)
         return {}
 
-    data = load_json(path)
+    data = load_json(effective_path)
     if not isinstance(data, dict):
-        raise ValueError(f"Le fichier {path} doit contenir un objet JSON nom -> numero de craft.")
+        raise ValueError(f"Le fichier {effective_path} doit contenir un objet JSON nom -> numero de craft.")
 
     cleaned_choices = {}
     for item_name, recipe_number in data.items():
@@ -514,7 +529,7 @@ def load_selected_recipe_choices(path: Path) -> Dict[str, int]:
         except (TypeError, ValueError):
             print(f"[Choix recettes] Valeur ignoree pour {item_name!r}: {recipe_number!r}", flush=True)
 
-    print(f"[Choix recettes] {len(cleaned_choices)} selections chargees depuis {path}", flush=True)
+    print(f"[Choix recettes] {len(cleaned_choices)} selections chargees depuis {effective_path}", flush=True)
     return cleaned_choices
 
 
@@ -956,6 +971,11 @@ def analyze_all_items():
     5. cumuler les resultats globaux
     6. ecrire les fichiers de sortie
     """
+    # Toutes les sorties du calcul principal sont regroupees dans un dossier
+    # dedie pour separer clairement les fichiers d'entree et les fichiers
+    # generes automatiquement.
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
     if not ITEMS_FILE.exists():
         raise FileNotFoundError(f"Fichier introuvable: {ITEMS_FILE}")
     if not RECIPES_FILE.exists():

@@ -22,7 +22,8 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 
 
-SOURCE_FILE = Path("Musee_Infinis_clean_with_totals.xlsx")
+SOURCE_DIR = Path("sortie calcul totaux")
+SOURCE_FILE = SOURCE_DIR / "Musee_Infinis_clean_with_totals.xlsx"
 OUTPUT_DIR = Path("sortie final clean")
 OUTPUT_FILE = OUTPUT_DIR / "Musee_Infinis_clean_with_totals_clean.xlsx"
 
@@ -58,7 +59,8 @@ def to_int(value: object) -> int:
 
 def clean_museum_file(source_path: Path, output_path: Path) -> None:
     """
-    Lit le fichier source enrichi et reconstruit le tableau final.
+    Lit le fichier source enrichi genere par `Calcul_total_items.py`
+    puis reconstruit le tableau final.
 
     Logique appliquée :
     1. lire les colonnes utiles du fichier source
@@ -75,8 +77,12 @@ def clean_museum_file(source_path: Path, output_path: Path) -> None:
     if not source_path.exists():
         raise FileNotFoundError(f"Fichier introuvable: {source_path}")
 
-    # On crée le dossier final automatiquement pour que le script puisse
-    # être relancé sans préparation manuelle.
+    # Le fichier source est cherche dans le dossier de sorties du calcul
+    # principal, ce qui permet d'enchainer les deux scripts sans deplacer
+    # les fichiers a la main.
+    #
+    # On cree aussi le dossier final automatiquement pour que le script puisse
+    # etre relance sans preparation manuelle.
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     source_workbook = load_workbook(source_path, data_only=True)
