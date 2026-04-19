@@ -23,6 +23,49 @@ Sorties :
 
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# GUIDE DE LECTURE POUR DEBUTANT
+# ---------------------------------------------------------------------------
+# Ce script est volontairement decompose en petites fonctions.
+# L'idee est de separer chaque responsabilite :
+#
+# 1. Charger les donnees
+#    - lire les JSON
+#    - lire le fichier Excel
+#
+# 2. Transformer les donnees
+#    - creer des dictionnaires de recherche rapide
+#    - convertir les recettes dans un format plus simple a manipuler
+#
+# 3. Resoudre un besoin pour un item
+#    - "de quoi ai-je besoin pour fabriquer cet item ?"
+#    - si un ingredient a lui-meme une recette, on recommence
+#    - si on arrive a une ressource de base, on s'arrete
+#
+# 4. Agreger les resultats
+#    - total global de ce qu'il faut farmer
+#    - detail par item
+#    - fichiers de sortie lisibles
+#
+# Pourquoi autant de dictionnaires ?
+# - un dictionnaire permet de retrouver une valeur tres vite a partir d'une cle
+# - ici on cherche tres souvent un item par son id ou par son nom
+#
+# Pourquoi Counter ?
+# - Counter est pratique pour additionner des quantites d'objets
+# - exemple : 3 stick + 5 stick = 8 stick automatiquement
+#
+# Pourquoi de la recursion ?
+# - une recette peut demander des ingredients
+# - ces ingredients peuvent eux-memes demander d'autres ingredients
+# - la structure est naturellement "en arbre"
+#
+# Pourquoi memoiser ?
+# - si on a deja calcule le cout d'un item pour une certaine quantite,
+#   inutile de refaire le travail
+# - cela accelere enormement le programme
+# ---------------------------------------------------------------------------
+
 import json
 import math
 from collections import Counter, defaultdict
@@ -80,8 +123,8 @@ BASE_FARMABLES_BY_NAME = {
 
 PRIORITY_BASE_ITEMS_BY_NAME = {
     "iron_ingot", "gold_ingot", "copper_ingot", "netherite_ingot",
-    "diamond", "emerald", "redstone", "lapis_lazuli", "coal", "quartz",
-    "cobblestone", "oak_log", "spruce_log", "birch_log", "jungle_log",
+    "diamond", "emerald", "redstone", "lapis_lazuli", "coal", "quartz", 
+    "oak_log", "spruce_log", "birch_log", "jungle_log",
     "acacia_log", "dark_oak_log", "mangrove_log", "cherry_log",
     "crimson_stem", "warped_stem",
 }
@@ -106,9 +149,13 @@ REVERSIBLE_CANONICAL_RULES = {
 # Ajustements manuels ajoutes au total global des ressources a farmer.
 # Format : item_name -> qty a additionner au total final.
 MANUAL_TOTAL_ADJUSTMENTS_BY_NAME = {
-    "arrow": 77760,
-    "glass_bottle": 3672,
-    "oak_log": 108,
+    #"arrow": 77760,
+    "flint": 19440,
+    "feather": 19440,
+    #"glass_bottle": 3672,
+    "sand": 3672,
+
+    "oak_log": 4968,
     "leather": 1161,
     "sugar_cane": 3483,
 }
@@ -121,6 +168,7 @@ STATIC_EXCLUDED_ITEMS_BY_NAME = {
 ITEMS_FILE = Path("items.json")
 RECIPES_FILE = Path("recipes.json")
 MUSEUM_EXCEL_FILE = Path("Musee_Infinis_clean.xlsx")
+MUSEUM_OUTPUT_EXCEL_FILE = Path("Musee_Infinis_clean_with_totals.xlsx")
 OUTPUT_JSON = Path("farming_summary.json")
 OUTPUT_TXT = Path("farming_totals.txt")
 OUTPUT_TREE_TXT = Path("farming_recipe_trees.txt")
@@ -133,13 +181,39 @@ VERBOSE_EXCEL_EVERY = 1000
 # =========================
 
 def load_json(path: Path) -> Any:
+    """
+    Lit un fichier JSON et retourne son contenu Python.
+
+    Pourquoi Path.open(...) ?
+    - `Path` vient de `pathlib` et rend la gestion des chemins plus lisible.
+    - `encoding="utf-8"` force un encodage explicite, ce qui evite des
+      problemes selon la machine ou le terminal.
+
+    Pourquoi `json.load(...)` ?
+    - parce qu'on lit directement depuis un fichier ouvert
+    - si on avait deja le texte en memoire, on utiliserait `json.loads(...)`
+    """
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def build_item_maps(items_data: List[Dict[str, Any]]) -> Tuple[Dict[int, dict], Dict[str, dict]]:
+    """
+    Construit deux dictionnaires de recherche rapide a partir de la liste des items.
+
+    Sortie :
+    - by_id[item_id] = item complet
+    - by_name[item_name] = item complet
+
+    Pourquoi faire cela ?
+    - `items.json` est une liste
+    - chercher un item dans une liste oblige a parcourir tous les elements
+    - avec un dictionnaire, l'acces par cle est direct et bien plus rapide
+    """
     by_id = {}
     by_name = {}
+
+    # On parcourt toute la liste une seule fois pour preparer deux index.
     for item in items_data:
         by_id[item["id"]] = item
         by_name[item["name"]] = item
@@ -147,10 +221,34 @@ def build_item_maps(items_data: List[Dict[str, Any]]) -> Tuple[Dict[int, dict], 
 
 
 def normalize_item_lookup_key(value: str) -> str:
+    """
+    Normalise un texte pour faciliter les correspondances.
+
+    Exemple :
+    - "Oak Log" devient "oak_log"
+    - " oak log " devient aussi "oak_log"
+
+    Cette fonction est utile quand les sources de donnees n'ecrivent pas
+    exactement les noms de la meme facon.
+    """
     return str(value).strip().lower().replace(" ", "_")
 
 
 def build_item_lookup_map(items_data: List[Dict[str, Any]]) -> Dict[str, str]:
+    """
+    Construit une table de correspondance tres permissive vers `item["name"]`.
+
+    On accepte plusieurs formes d'un meme item :
+    - son `name` technique
+    - son `displayName`
+    - une version normalisee de chacun
+
+    Exemple :
+    - "Oak Log"
+    - "oak_log"
+    - "oak log"
+    pointent tous vers `oak_log`.
+    """
     lookup = {}
     for item in items_data:
         item_name = item.get("name")
@@ -158,6 +256,8 @@ def build_item_lookup_map(items_data: List[Dict[str, Any]]) -> Dict[str, str]:
         if not item_name:
             continue
 
+        # On enregistre plusieurs variantes de la meme cle pour etre tolerant
+        # avec les differences d'ecriture entre les fichiers.
         for candidate in (item_name, display_name, normalize_item_lookup_key(item_name)):
             if candidate:
                 lookup.setdefault(str(candidate).strip(), item_name)
@@ -175,6 +275,23 @@ def load_allowed_items_from_excel(
     items_by_name: Dict[str, dict],
     item_lookup_map: Dict[str, str],
 ) -> Set[str]:
+    """
+    Lit le fichier Excel du musee et retourne l'ensemble des items autorises.
+
+    On utilise ici `openpyxl`, une bibliotheque tres pratique pour lire et
+    ecrire des fichiers Excel `.xlsx` depuis Python.
+
+    Choix importants :
+    - `read_only=True` :
+      on lit le fichier en mode lecture seule pour consommer moins de memoire
+    - `data_only=True` :
+      si certaines cellules contiennent des formules, on lit leur valeur
+      calculee plutot que la formule brute
+
+    La fonction retourne un `set` plutot qu'une liste car :
+    - on veut des elements uniques
+    - les tests `x in mon_set` sont tres rapides
+    """
     if not excel_path.exists():
         raise FileNotFoundError(f"Fichier introuvable: {excel_path}")
 
@@ -206,6 +323,9 @@ def load_allowed_items_from_excel(
         allowed_items = set()
         print(f"[Excel] Debut de lecture des lignes de donnees a conserver...", flush=True)
 
+        # `iter_rows(..., values_only=True)` retourne directement les valeurs
+        # des cellules, sans creer des objets Cell complets. C'est plus rapide
+        # et largement suffisant pour notre besoin.
         for row_number, row_values in enumerate(
             worksheet.iter_rows(min_row=2, values_only=True),
             start=2,
@@ -218,6 +338,7 @@ def load_allowed_items_from_excel(
                     flush=True,
                 )
 
+            # Si la cellule est vide, il n'y a rien a exploiter sur cette ligne.
             if not excel_item_name:
                 continue
 
@@ -239,6 +360,8 @@ def load_allowed_items_from_excel(
                     flush=True,
                 )
 
+        # On retire enfin quelques exclusions "hardcodees" qui ne doivent
+        # jamais entrer dans le calcul, meme si elles apparaissent ailleurs.
         allowed_items.difference_update(STATIC_EXCLUDED_ITEMS_BY_NAME)
         print(f"[Excel] Lecture terminee. Total conserves: {len(allowed_items)}", flush=True)
         return allowed_items
@@ -247,6 +370,12 @@ def load_allowed_items_from_excel(
 
 
 def print_progress(current: int, total: int, width: int = 40) -> None:
+    """
+    Affiche une barre de progression dans le terminal.
+
+    La technique utilise `\\r` (retour chariot) pour reecrire la meme ligne
+    plutot que d'en afficher une nouvelle a chaque iteration.
+    """
     if total <= 0:
         return
 
@@ -264,6 +393,15 @@ def print_progress(current: int, total: int, width: int = 40) -> None:
 # =========================
 
 def extract_ingredients_from_recipe(recipe: Dict[str, Any]) -> Counter:
+    """
+    Extrait les ingredients d'une recette et les compte avec un Counter.
+
+    Un Counter est une structure tres pratique pour dire :
+    - cet ingredient apparait 1 fois
+    - cet autre ingredient apparait 3 fois
+
+    Cela evite de gerer manuellement des additions dans un dictionnaire.
+    """
     """
     Retourne un Counter {item_id: quantité} pour une recette.
 
@@ -288,6 +426,12 @@ def extract_ingredients_from_recipe(recipe: Dict[str, Any]) -> Counter:
 
 
 def normalize_recipes(raw_recipes: Dict[str, List[Dict[str, Any]]]) -> Dict[int, List[Dict[str, Any]]]:
+    """
+    Reorganise les recettes dans une structure plus simple pour le reste du code.
+
+    Le JSON brut est correct, mais pas ideal pour faire beaucoup de recherches.
+    Ici on prepare une version "pre-analysee" des recettes.
+    """
     """
     Transforme recipes.json en structure plus simple :
     {
@@ -342,10 +486,12 @@ def normalize_recipes(raw_recipes: Dict[str, List[Dict[str, Any]]]) -> Dict[int,
 # =========================
 
 class ResolutionError(Exception):
+    """Exception personnalisee reservee aux erreurs de resolution."""
     pass
 
 
 def counter_to_named_dict(counter: Counter, items_by_id: Dict[int, dict]) -> Dict[str, int]:
+    """Transforme un Counter base sur des ids en dictionnaire base sur des noms."""
     result = {}
     for item_id, qty in sorted(counter.items(), key=lambda kv: items_by_id.get(kv[0], {}).get("name", str(kv[0]))):
         item = items_by_id.get(item_id)
@@ -355,10 +501,12 @@ def counter_to_named_dict(counter: Counter, items_by_id: Dict[int, dict]) -> Dic
 
 
 def multiply_counter(counter: Counter, factor: int) -> Counter:
+    """Multiplie toutes les quantites d'un Counter par un facteur."""
     return Counter({k: v * factor for k, v in counter.items()})
 
 
 def merge_counters(a: Counter, b: Counter) -> Counter:
+    """Fusionne deux compteurs en additionnant les quantites cle par cle."""
     result = Counter(a)
     result.update(b)
     return result
@@ -373,6 +521,7 @@ def total_base_cost(counter: Counter) -> int:
 
 
 def convert_qty_with_ratio(qty: int, multiplier_num: int, multiplier_den: int) -> int:
+    """Convertit une quantite selon un ratio, en arrondissant toujours au dessus."""
     return math.ceil(qty * multiplier_num / multiplier_den)
 
 
@@ -381,6 +530,14 @@ def convert_qty_with_ratio(qty: int, multiplier_num: int, multiplier_den: int) -
 # =========================
 
 class CraftAnalyzer:
+    """
+    Objet principal charge de resoudre les couts de craft.
+
+    Pourquoi une classe ici ?
+    - elle regroupe les donnees partagees par toutes les fonctions de calcul
+    - elle evite de passer sans arret les memes variables en argument
+    - elle permet de garder une memoisation interne propre
+    """
     def __init__(
         self,
         items_by_id: Dict[int, dict],
@@ -389,26 +546,39 @@ class CraftAnalyzer:
         base_farmables_by_name: Set[str],
         allowed_items_by_name: Set[str],
     ):
+        """
+        Prepare toutes les structures utiles au calcul.
+
+        On transforme ici les noms en ids tres tot, car les ids sont plus
+        compacts et plus stables pour le calcul interne.
+        """
         self.items_by_id = items_by_id
         self.items_by_name = items_by_name
         self.recipes_by_result = recipes_by_result
 
+        # On convertit les noms "base farmables" en ids une fois pour toutes.
         self.base_farmable_ids = {
             self.items_by_name[name]["id"]
             for name in base_farmables_by_name
             if name in self.items_by_name
         }
+        # Meme principe pour les ressources prioritaires.
         self.priority_base_ids = {
             self.items_by_name[name]["id"]
             for name in PRIORITY_BASE_ITEMS_BY_NAME
             if name in self.items_by_name
         }
+        # Les items autorises viennent de la liste blanche du musee.
         self.allowed_item_ids = {
             self.items_by_name[name]["id"]
             for name in allowed_items_by_name
             if name in self.items_by_name
         }
+        # Tout item non autorise est considere comme exclu.
         self.excluded_item_ids = set(self.items_by_id.keys()) - self.allowed_item_ids
+
+        # Ce dictionnaire sert a ramener certaines formes vers une ressource
+        # canonique, par exemple iron_block -> iron_ingot.
         self.reversible_alias_rules_by_id = {}
         for alias_name, (canonical_name, multiplier_num, multiplier_den) in REVERSIBLE_CANONICAL_RULES.items():
             alias_item = self.items_by_name.get(alias_name)
@@ -424,16 +594,20 @@ class CraftAnalyzer:
         self.memo: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
     def item_name(self, item_id: int) -> str:
+        """Retourne le nom d'un item a partir de son id."""
         item = self.items_by_id.get(item_id)
         return item["name"] if item else f"unknown_{item_id}"
 
     def is_excluded(self, item_id: int) -> bool:
+        """Indique si un item ne doit pas etre traite dans l'analyse."""
         return item_id in self.excluded_item_ids
 
     def is_base_farmable(self, item_id: int) -> bool:
+        """Indique si l'on s'arrete sur cet item comme ressource de base."""
         return item_id in self.base_farmable_ids
 
     def has_recipe(self, item_id: int) -> bool:
+        """Indique si l'item possede au moins une recette connue."""
         return item_id in self.recipes_by_result and len(self.recipes_by_result[item_id]) > 0
 
     def normalize_leaf_item(self, item_id: int, qty: int) -> Tuple[int, int]:
@@ -450,6 +624,7 @@ class CraftAnalyzer:
         return canonical_id, convert_qty_with_ratio(qty, multiplier_num, multiplier_den)
 
     def normalize_counter(self, counter: Counter) -> Counter:
+        """Applique la normalisation canonique a toutes les entrees d'un Counter."""
         normalized = Counter()
         for item_id, qty in counter.items():
             normalized_item_id, normalized_qty = self.normalize_leaf_item(item_id, qty)
@@ -457,6 +632,7 @@ class CraftAnalyzer:
         return normalized
 
     def reversible_penalty_for_ingredients(self, ingredients: Counter) -> int:
+        """Calcule une penalite pour les recettes qui utilisent des formes reversibles."""
         penalty = 0
         for ingredient_id, ingredient_qty in ingredients.items():
             if ingredient_id in self.reversible_alias_rules_by_id:
@@ -464,6 +640,7 @@ class CraftAnalyzer:
         return penalty
 
     def priority_base_bonus(self, counter: Counter) -> int:
+        """Mesure combien une solution s'exprime deja en ressources prioritaires."""
         return sum(qty for item_id, qty in counter.items() if item_id in self.priority_base_ids)
 
     def resolve_item(
@@ -473,21 +650,32 @@ class CraftAnalyzer:
         visiting: Optional[Set[int]] = None
     ) -> Dict[str, Any]:
         """
-        Retourne un dict :
-        {
-          "base_resources": Counter,
-          "unresolved": Counter,
-          "excluded": Counter,
-          "recipe_used": dict | None
-        }
+        Fonction recursive principale du programme.
+
+        Elle repond a la question :
+        "Que faut-il au final pour obtenir `required_qty` exemplaires de cet item ?"
+
+        La fonction retourne un dictionnaire avec :
+        - `base_resources` : ce qu'il faut vraiment farmer
+        - `unresolved` : ce qu'on n'a pas su decomposer
+        - `excluded` : ce qui a ete ignore car hors liste
+        - `recipe_used` : la recette choisie si l'item est craftable
+
+        Le parametre `visiting` sert a detecter les cycles.
+        Exemple de probleme sans cette protection :
+        A demande B, B demande C, C redemande A.
         """
         if visiting is None:
             visiting = set()
 
+        # La memoisation est un cache :
+        # si on a deja calcule cet item pour cette quantite exacte,
+        # on reutilise le resultat au lieu de recalculer tout l'arbre.
         memo_key = (item_id, required_qty)
         if memo_key in self.memo:
             return deepcopy(self.memo[memo_key])
 
+        # Cas simple : demander 0 item ne coute rien.
         if required_qty <= 0:
             result = {
                 "base_resources": Counter(),
@@ -499,6 +687,7 @@ class CraftAnalyzer:
             return result
 
         # Exclu
+        # Si l'item est exclu, on ne poursuit pas sa decomposition.
         if self.is_excluded(item_id):
             normalized_item_id, normalized_qty = self.normalize_leaf_item(item_id, required_qty)
             result = {
@@ -511,6 +700,8 @@ class CraftAnalyzer:
             return result
 
         # Ressource de base
+        # Si l'item est une ressource de base, on considere que c'est
+        # la fin de la chaine de craft.
         if self.is_base_farmable(item_id):
             normalized_item_id, normalized_qty = self.normalize_leaf_item(item_id, required_qty)
             result = {
@@ -523,6 +714,9 @@ class CraftAnalyzer:
             return result
 
         # Anti-cycle
+        # Protection anti-boucle :
+        # si on revoit le meme item dans la pile courante de recursion,
+        # on coupe pour eviter une boucle infinie.
         if item_id in visiting:
             normalized_item_id, normalized_qty = self.normalize_leaf_item(item_id, required_qty)
             result = {
@@ -536,6 +730,7 @@ class CraftAnalyzer:
 
         # Pas de recette => non résolu => on considère qu'on doit le farmer tel quel
         # ou au moins le signaler.
+        # Si aucune recette n'existe, on ne peut pas aller plus loin.
         if not self.has_recipe(item_id):
             normalized_item_id, normalized_qty = self.normalize_leaf_item(item_id, required_qty)
             result = {
@@ -547,11 +742,16 @@ class CraftAnalyzer:
             self.memo[memo_key] = deepcopy(result)
             return result
 
+        # On copie l'ensemble pour ne pas modifier l'objet recu depuis l'appel
+        # parent. C'est une bonne pratique quand on veut garder un etat local
+        # propre a cette branche de recursion.
         visiting = set(visiting)
         visiting.add(item_id)
 
         candidate_results = []
 
+        # Un item peut avoir plusieurs recettes.
+        # On va toutes les tester, puis choisir la meilleure a la fin.
         for recipe in self.recipes_by_result[item_id]:
             result_count = recipe["result_count"]
             ingredients = recipe["ingredients"]
@@ -559,14 +759,14 @@ class CraftAnalyzer:
             if result_count <= 0:
                 continue
 
+            # Nombre de crafts necessaires pour atteindre la quantite demandee.
             crafts_needed = math.ceil(required_qty / result_count)
 
             aggregate_base = Counter()
             aggregate_unresolved = Counter()
             aggregate_excluded = Counter()
 
-            valid = True
-
+            # On resout ensuite chaque ingredient de la recette.
             for ingredient_id, ingredient_qty in ingredients.items():
                 needed_ingredient_qty = ingredient_qty * crafts_needed
                 sub = self.resolve_item(ingredient_id, needed_ingredient_qty, visiting=visiting)
@@ -575,11 +775,14 @@ class CraftAnalyzer:
                 aggregate_unresolved.update(sub["unresolved"])
                 aggregate_excluded.update(sub["excluded"])
 
+            # Une fois toute la recette resolue, on normalise les formes
+            # reversibles pour exprimer le besoin dans une forme canonique.
             aggregate_base = self.normalize_counter(aggregate_base)
             aggregate_unresolved = self.normalize_counter(aggregate_unresolved)
             aggregate_excluded = self.normalize_counter(aggregate_excluded)
             reversible_penalty = self.reversible_penalty_for_ingredients(ingredients)
 
+            # On stocke la solution candidate complete pour comparaison.
             candidate_results.append({
                 "base_resources": aggregate_base,
                 "unresolved": aggregate_unresolved,
@@ -609,6 +812,8 @@ class CraftAnalyzer:
             self.memo[memo_key] = deepcopy(result)
             return result
 
+        # On choisit ensuite la "meilleure" recette selon plusieurs criteres
+        # classes par ordre d'importance.
         best = min(
             candidate_results,
             key=lambda x: (
@@ -630,6 +835,14 @@ class CraftAnalyzer:
         return result
 
     def target_quantity_for_item(self, item_id: int) -> int:
+        """
+        Calcule la quantite cible pour un item.
+
+        Exemple :
+        - stackSize = 64
+        - 27 slots dans un coffre
+        => cible = 1728
+        """
         item = self.items_by_id[item_id]
         stack_size = int(item.get("stackSize", 64))
         if stack_size <= 0:
@@ -642,6 +855,17 @@ class CraftAnalyzer:
 # =========================
 
 def analyze_all_items():
+    """
+    Fonction "chef d'orchestre" du programme.
+
+    C'est elle qui enchaine toutes les etapes dans le bon ordre :
+    1. verifier la presence des fichiers
+    2. charger les donnees
+    3. preparer l'analyseur
+    4. parcourir chaque item autorise
+    5. cumuler les resultats globaux
+    6. ecrire les fichiers de sortie
+    """
     if not ITEMS_FILE.exists():
         raise FileNotFoundError(f"Fichier introuvable: {ITEMS_FILE}")
     if not RECIPES_FILE.exists():
@@ -649,6 +873,7 @@ def analyze_all_items():
     if not MUSEUM_EXCEL_FILE.exists():
         raise FileNotFoundError(f"Fichier introuvable: {MUSEUM_EXCEL_FILE}")
 
+    # Lecture des deux gros fichiers JSON d'entree.
     print(f"[Init] Chargement de {ITEMS_FILE}...", flush=True)
     items_data = load_json(ITEMS_FILE)
     print(f"[Init] {len(items_data)} items charges.", flush=True)
@@ -657,6 +882,10 @@ def analyze_all_items():
     recipes_data = load_json(RECIPES_FILE)
     print(f"[Init] {len(recipes_data)} entrees de recettes chargees.", flush=True)
 
+    # Ici on prepare plusieurs "vues" des memes donnees :
+    # - par id
+    # - par nom
+    # - par recettes normalisees
     items_by_id, items_by_name = build_item_maps(items_data)
     item_lookup_map = build_item_lookup_map(items_data)
     recipes_by_result = normalize_recipes(recipes_data)
@@ -666,6 +895,8 @@ def analyze_all_items():
         item_lookup_map=item_lookup_map,
     )
 
+    # L'objet `analyzer` contient toutes les regles et toutes les donnees
+    # partagees par la resolution recursive.
     analyzer = CraftAnalyzer(
         items_by_id=items_by_id,
         items_by_name=items_by_name,
@@ -680,7 +911,8 @@ def analyze_all_items():
 
     per_item_details = {}
 
-    # Tri pour avoir une sortie stable
+    # On trie les items pour avoir toujours le meme ordre de sortie.
+    # C'est tres utile pour comparer deux executions ou deux commits.
     all_item_ids = sorted(items_by_id.keys(), key=lambda i: items_by_id[i]["name"])
     item_ids_to_process = [item_id for item_id in all_item_ids if item_id not in analyzer.excluded_item_ids]
     total_items_to_process = len(item_ids_to_process)
@@ -695,6 +927,8 @@ def analyze_all_items():
         }
     )
 
+    # Ces ajustements sont volontairement appliques a la fin, car ils
+    # representent des besoins "hors calcul automatique".
     manual_total_adjustments = Counter()
     for item_name, qty_to_add in MANUAL_TOTAL_ADJUSTMENTS_BY_NAME.items():
         item = items_by_name.get(item_name)
@@ -704,6 +938,8 @@ def analyze_all_items():
         manual_total_adjustments[item["id"]] += qty_to_add
         print(f"[Ajustement] {item_name} +{qty_to_add}", flush=True)
 
+    # Boucle principale :
+    # on calcule independamment le cout de chaque item autorise.
     for index, item_id in enumerate(item_ids_to_process, start=1):
         item = items_by_id[item_id]
         item_name = item["name"]
@@ -715,10 +951,13 @@ def analyze_all_items():
         )
         resolution = analyzer.resolve_item(item_id, target_qty)
 
+        # Chaque resolution renvoie plusieurs compteurs que l'on additionne
+        # ensuite dans les totaux globaux.
         grand_total_base.update(resolution["base_resources"])
         grand_total_unresolved.update(resolution["unresolved"])
         grand_total_excluded.update(resolution["excluded"])
 
+        # On stocke aussi un detail complet pour cet item precis.
         per_item_details[item_name] = {
             "item_id": item_id,
             "display_name": item.get("displayName", item_name),
@@ -732,6 +971,8 @@ def analyze_all_items():
 
         print_progress(index, total_items_to_process)
 
+    # On prepare une structure JSON propre, facile a relire ou a reutiliser
+    # depuis un autre script plus tard.
     summary = {
         "config": {
             "chest_slots": CHEST_SLOTS,
@@ -753,9 +994,21 @@ def analyze_all_items():
         "per_item_details": per_item_details,
     }
 
+    # Ecriture du JSON detaille.
     with OUTPUT_JSON.open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
+    # Cette exportation Excel est faite a la fin de CHAQUE execution.
+    # On depend du resume final `summary`, donc il faut attendre que tous les
+    # calculs soient termines avant de remplir les colonnes H et I.
+    export_museum_excel_with_totals(
+        source_excel_path=MUSEUM_EXCEL_FILE,
+        output_excel_path=MUSEUM_OUTPUT_EXCEL_FILE,
+        items_data=items_data,
+        summary=summary,
+    )
+
+    # Ecriture des autres sorties plus "humaines".
     write_recipe_tree_summary(
         analyzer=analyzer,
         item_ids_to_process=item_ids_to_process,
@@ -775,6 +1028,12 @@ def analyze_all_items():
 
 
 def format_recipe_used(recipe_used: Optional[Dict[str, Any]], items_by_id: Dict[int, dict]) -> Optional[Dict[str, Any]]:
+    """
+    Transforme la recette choisie en version lisible avec des noms d'items.
+
+    En interne, les recettes utilisent surtout des ids.
+    Pour l'affichage, les noms sont beaucoup plus confortables.
+    """
     if recipe_used is None:
         return None
 
@@ -790,6 +1049,99 @@ def format_recipe_used(recipe_used: Optional[Dict[str, Any]], items_by_id: Dict[
         "crafts_needed": recipe_used["crafts_needed"],
         "ingredients": ingredients_named,
     }
+
+
+def export_museum_excel_with_totals(
+    source_excel_path: Path,
+    output_excel_path: Path,
+    items_data: List[Dict[str, Any]],
+    summary: Dict[str, Any],
+) -> None:
+    """
+    Cree une copie du fichier Excel du musee et y ajoute deux colonnes calculees.
+
+    Colonnes ajoutees :
+    - H : "Total à farm"
+      total global a farmer pour cet item
+      (on additionne ici `base_resources` et `unresolved`, car certains
+      items minables ou non craftables peuvent etre calcules mais classes
+      dans `unresolved` par le moteur)
+    - I : "Total cible item"
+      quantite cible de cet item lui-meme
+
+    Pourquoi faire cette exportation a la fin ?
+    - parce que ces valeurs n'existent qu'une fois les calculs termines
+    - on a besoin du `summary` final pour remplir les cellules
+
+    Pourquoi faire une copie plutot que modifier l'original ?
+    - pour conserver le fichier source intact
+    - pour separer clairement les donnees d'entree et les donnees generees
+    """
+    # On reconstruit une table de correspondance texte -> item_name pour faire
+    # le lien entre la colonne `english_name` du musee et les noms internes.
+    item_lookup_map = build_item_lookup_map(items_data)
+    global_base_resources = summary.get("global_totals", {}).get("base_resources", {})
+    global_unresolved_resources = summary.get("global_totals", {}).get("unresolved", {})
+    per_item_details = summary.get("per_item_details", {})
+
+    print(f"[Excel Export] Creation de {output_excel_path}...", flush=True)
+
+    # Ici on ouvre le classeur en mode normal (pas read_only), car on veut
+    # modifier des cellules puis sauvegarder un nouveau fichier.
+    workbook = load_workbook(source_excel_path)
+    try:
+        sheet_name = "Sheet1" if "Sheet1" in workbook.sheetnames else workbook.sheetnames[0]
+        worksheet = workbook[sheet_name]
+
+        # On ecrit les en-tetes des nouvelles colonnes.
+        worksheet.cell(row=1, column=8).value = "Total à farm"
+        worksheet.cell(row=1, column=9).value = "Total cible item"
+
+        # On parcourt toutes les lignes de donnees du fichier musee.
+        for row_number in range(2, worksheet.max_row + 1):
+            english_name = worksheet.cell(row=row_number, column=7).value
+
+            total_to_farm_cell = worksheet.cell(row=row_number, column=8)
+            target_total_cell = worksheet.cell(row=row_number, column=9)
+
+            # Si la ligne n'a pas de nom anglais, on met 0 dans les colonnes.
+            if not english_name:
+                total_to_farm_cell.value = 0
+                target_total_cell.value = 0
+                continue
+
+            raw_excel_item_name = str(english_name).strip()
+            normalized_excel_item_name = normalize_item_lookup_key(raw_excel_item_name)
+            resolved_item_name = (
+                item_lookup_map.get(raw_excel_item_name)
+                or item_lookup_map.get(normalized_excel_item_name)
+            )
+
+            # Si aucun item n'est trouve, on met 0.
+            if not resolved_item_name:
+                total_to_farm_cell.value = 0
+                target_total_cell.value = 0
+                continue
+
+            # La colonne H utilise le total global calcule pour cet item.
+            # On additionne :
+            # - `base_resources` : vraies ressources de base reconnues
+            # - `unresolved` : besoins calcules mais non classes comme base
+            # Cela corrige par exemple des cas comme `cobbled_deepslate`,
+            # qui est bien comptabilise par le calcul mais pouvait apparaitre
+            # dans `unresolved` plutot que dans `base_resources`.
+            total_to_farm_cell.value = int(
+                global_base_resources.get(resolved_item_name, 0)
+                + global_unresolved_resources.get(resolved_item_name, 0)
+            )
+
+            # La colonne I utilise la quantite cible de l'item lui-meme.
+            item_detail = per_item_details.get(resolved_item_name, {})
+            target_total_cell.value = int(item_detail.get("target_quantity", 0))
+
+        workbook.save(output_excel_path)
+    finally:
+        workbook.close()
 
 
 def build_recipe_tree_lines(
@@ -856,6 +1208,12 @@ def build_recipe_tree_lines_v2(
     depth: int = 0,
     visiting: Optional[Set[int]] = None,
 ) -> List[str]:
+    """
+    Construit recursivement un petit arbre texte pour afficher une recette.
+
+    Cette fonction est surtout orientee "lecture humaine" et non performance.
+    Elle sert a visualiser les dependances entre crafts.
+    """
     if visiting is None:
         visiting = set()
 
@@ -917,6 +1275,7 @@ def write_recipe_tree_summary(
     analyzer: CraftAnalyzer,
     item_ids_to_process: List[int],
 ):
+    """Ecrit le fichier texte qui contient un arbre de craft par item."""
     lines = [
         "=== ARBORESCENCE DES RECETTES ===",
         "Chaque arbre correspond a 1 craft de l'item.",
@@ -937,6 +1296,14 @@ def write_human_readable_summary(
     grand_total_excluded: Counter,
     per_item_details: Dict[str, Any],
 ):
+    """
+    Ecrit un grand fichier texte lisible pour un humain.
+
+    Le but n'est pas d'etre compact, mais d'etre facile a parcourir :
+    - d'abord les totaux globaux
+    - ensuite les cas non resolus / exclus
+    - enfin le detail item par item
+    """
     lines = []
 
     lines.append("=== TOTAL GLOBAL DES RESSOURCES À FARMER ===")
