@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-Construit la version finale nettoyee du fichier musee.
+Construit la version finale nettoyée du fichier musée.
 
-Le resultat final doit contenir exactement ces colonnes :
+Le résultat final doit contenir exactement ces colonnes :
 - Items
 - Stack max
 - Quantité requise
@@ -59,7 +59,7 @@ def to_int(value: object) -> int:
 
 def clean_museum_file(source_path: Path, output_path: Path) -> None:
     """
-    Lit le fichier source enrichi genere par `Calcul_total_items.py`
+    Lit le fichier source enrichi généré par `Calcul_total_items.py`
     puis reconstruit le tableau final.
 
     Logique appliquée :
@@ -77,12 +77,12 @@ def clean_museum_file(source_path: Path, output_path: Path) -> None:
     if not source_path.exists():
         raise FileNotFoundError(f"Fichier introuvable: {source_path}")
 
-    # Le fichier source est cherche dans le dossier de sorties du calcul
-    # principal, ce qui permet d'enchainer les deux scripts sans deplacer
-    # les fichiers a la main.
+    # Le fichier source est cherché dans le dossier de sorties du calcul
+    # principal, ce qui permet d'enchaîner les deux scripts sans déplacer
+    # les fichiers à la main.
     #
-    # On cree aussi le dossier final automatiquement pour que le script puisse
-    # etre relance sans preparation manuelle.
+    # On crée aussi le dossier final automatiquement pour que le script puisse
+    # être relancé sans préparation manuelle.
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     source_workbook = load_workbook(source_path, data_only=True)
@@ -92,7 +92,7 @@ def clean_museum_file(source_path: Path, output_path: Path) -> None:
 
         # On crée un nouveau classeur vide au lieu de réutiliser celui chargé.
         # C'est plus fiable pour produire un fichier final propre et évite
-        # les effets de bord quand on supprime/reconstruit des colonnes.
+        # les effets de bord quand on supprime ou reconstruit des colonnes.
         output_workbook = Workbook()
         output_worksheet = output_workbook.active
         output_worksheet.title = sheet_name
@@ -130,7 +130,7 @@ def clean_museum_file(source_path: Path, output_path: Path) -> None:
             on_recipes_res = normalize_bool_text(source_worksheet.cell(row=row_number, column=10).value)
             on_recipes_ingredient = normalize_bool_text(source_worksheet.cell(row=row_number, column=11).value)
 
-            # Si l'item n'apparait dans aucune recette, il ne doit pas compter
+            # Si l'item n'apparaît dans aucune recette, il ne doit pas compter
             # comme un besoin de farm pour les items craftables.
             if on_recipes_res == "false" and on_recipes_ingredient == "false":
                 total_to_farm = 0

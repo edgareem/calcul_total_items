@@ -9,7 +9,7 @@ But :
 - écrire une liste lisible dans un fichier texte
 
 Pourquoi ce script est séparé ?
-- il répond à un besoin d'audit / de diagnostic
+- il répond à un besoin d'audit ou de diagnostic
 - il ne change pas le calcul principal
 - il peut être relancé indépendamment quand on veut inspecter les recettes
 """
@@ -17,8 +17,8 @@ Pourquoi ce script est séparé ?
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from collections import Counter
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 
@@ -54,7 +54,7 @@ def build_item_name_maps(items_data: List[Dict[str, Any]]) -> Tuple[Dict[int, st
 
 def extract_ingredients_from_recipe(recipe: Dict[str, Any]) -> Counter:
     """
-    Extrait les ingredients d'une recette et retourne un Counter {item_id: qty}.
+    Extrait les ingrédients d'une recette et retourne un Counter {item_id: qty}.
 
     Le format des recettes n'est pas toujours identique :
     - `inShape` pour une recette en grille
@@ -117,17 +117,17 @@ def write_duplicate_results_report(
     output_path: Path,
 ) -> None:
     """
-    Ecrit un rapport texte detaille.
+    Écrit un rapport texte détaillé.
 
     Pour chaque item ayant plusieurs recettes, on liste chaque craft avec :
-    - un numero de craft
-    - la quantite produite
-    - les ingredients et leurs quantites
+    - un numéro de craft
+    - la quantité produite
+    - les ingrédients et leurs quantités
 
-    Ce format servira plus tard a choisir explicitement un craft a conserver.
+    Ce format sert ensuite à choisir explicitement un craft à conserver.
     """
     lines = []
-    lines.append("=== ITEMS AVEC PLUSIEURS RECETTES POUR LE MEME RESULTAT ===")
+    lines.append("=== ITEMS AVEC PLUSIEURS RECETTES POUR LE MÊME RÉSULTAT ===")
     lines.append(f"Total : {len(duplicates)}")
     lines.append("")
 
@@ -143,7 +143,7 @@ def write_duplicate_results_report(
 
             ingredients = extract_ingredients_from_recipe(recipe)
             if not ingredients:
-                lines.append("    ingredients: (aucun ingredient detecte)")
+                lines.append("    ingredients: (aucun ingrédient détecté)")
                 continue
 
             for ingredient_id, qty in sorted(ingredients.items(), key=lambda kv: names_by_id.get(kv[0], str(kv[0]))):
@@ -162,8 +162,8 @@ def main() -> None:
     if not ITEMS_FILE.exists():
         raise FileNotFoundError(f"Fichier introuvable: {ITEMS_FILE}")
 
-    # On regroupe les sorties du script dans un dossier dedie pour separer
-    # clairement les fichiers sources JSON du rapport genere.
+    # On regroupe les sorties du script dans un dossier dédié pour séparer
+    # clairement les fichiers sources JSON du rapport généré.
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print(f"[Init] Chargement de {ITEMS_FILE}...")
