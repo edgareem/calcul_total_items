@@ -1225,7 +1225,7 @@ def export_museum_excel_with_totals(
         worksheet = workbook[sheet_name]
 
         # On ecrit les en-tetes des nouvelles colonnes.
-        worksheet.cell(row=1, column=8).value = "Total à farm"
+        worksheet.cell(row=1, column=8).value = "Total Pour Items Craftables"
         worksheet.cell(row=1, column=9).value = "Total cible item"
         worksheet.cell(row=1, column=10).value = "OnRecipes_Res"
         worksheet.cell(row=1, column=11).value = "OnRecipes_Ingredient"
